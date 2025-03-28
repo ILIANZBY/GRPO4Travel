@@ -1,138 +1,74 @@
-# from trl import GRPOConfig,GRPOTrainer
-# from reward import reward_function
-# import torch.nn as nn
-
-# training_args = GRPOConfig(
-#     # 基础路径配置
-#     output_dir="/share/home/wuqingyao_zhangboyang/grpo/output",
-#     logging_dir="./logs",  # 新增独立日志目录
-#     report_to=["tensorboard"],  # 增加可视化监控
-    
-#     # 批处理与内存优化
-#     per_device_train_batch_size=4,  # 增大batch size (原4→8)
-#     gradient_accumulation_steps=2,  # 新增梯度累积
-#     fp16=True,  # 启用混合精度训练
-    
-#     # 学习率调度
-#     learning_rate=3e-5,  # 适当提高学习率 (原1e-5→3e-5)
-#     lr_scheduler_type="cosine_with_restarts",  # 新增余弦退火
-#     warmup_ratio=0.1,  # 新增学习率预热
-    
-#     # 强化学习参数优化
-#     beta=0.2,  # 调整KL散度系数 (原0.1→0.2)
-#     num_generations=4,  # 增加生成样本数 (原8→12)
-#     # generation_kwargs={
-#     #     "top_p": 0.9,  # 新增核采样
-#     #     "temperature": 0.7,  # 控制多样性
-#     #     "repetition_penalty": 1.2  # 防止重复
-#     # },
-    
-#     # 序列长度配置
-#     max_prompt_length=8000,
-#     max_completion_length=2000,  # 适当增加 (原256→384)
-#     # truncation_mode="keep_end",  # 重要信息通常在末尾
-    
-#     # 训练过程控制
-#     num_train_epochs=5,  # 明确训练轮次
-#     save_steps=500,  # 保存间隔
-#     logging_steps=50,  # 减少日志频率 (原10→50)
-#     evaluation_strategy="steps",  # 新增评估策略
-#     eval_steps=200,  # 每200步评估
-    
-#     # 硬件优化
-#     gradient_checkpointing=True,  # 内存优化
-#     optim="adamw_torch_fused",  # 使用融合优化器
-#     torch_compile=True  # 启用模型编译
-# )
-# from datasets import load_dataset
-
-# # 加载 JSON 文件（自动识别格式）
-# dataset = load_dataset("json", data_files="/share/home/wuqingyao_zhangboyang/grpo/dataset/3000_grpo.json")["train"]
-# split_datasets = dataset.train_test_split(test_size=0.01, seed=42)
-# train_dataset = split_datasets["train"]
-# test_dataset = split_datasets["test"]
-
-
-
-
-# trainer = GRPOTrainer(
-#     # model="/share/home/wuqingyao_zhangboyang/.xinference/cache/qwen2_5-pytorch-7b",
-#     model="/share/home/wuqingyao_zhangboyang/3000",
-#     reward_funcs=reward_function,  
-#     args=training_args,
-#     train_dataset=train_dataset,
-#     eval_dataset=test_dataset
-# )
-# trainer.train()
-
 from trl import GRPOConfig, GRPOTrainer
 from reward import reward_function
-import torch
-from accelerate import Accelerator
-
-# Initialize accelerator for multi-GPU training
-accelerator = Accelerator()
-
-training_args = GRPOConfig(
-    # 基础路径配置
-    output_dir="/share/home/wuqingyao_zhangboyang/grpo/output",
-    logging_dir="./logs",
-    report_to=["tensorboard"],
-    
-    # Multi-GPU configuration
-    dataloader_num_workers=4,  # Increase workers for multi-GPU
-    ddp_find_unused_parameters=False,  # For distributed training
-    
-    # 批处理与内存优化
-    per_device_train_batch_size=4,  # This is per GPU
-    gradient_accumulation_steps=2,
-    fp16=True,
-    
-    # 学习率调度
-    learning_rate=3e-5,
-    lr_scheduler_type="cosine_with_restarts",
-    warmup_ratio=0.1,
-    
-    # 强化学习参数优化
-    beta=0.2,
-    num_generations=4,
-    
-    # 序列长度配置
-    max_prompt_length=8000,
-    max_completion_length=2000,
-    
-    # 训练过程控制
-    num_train_epochs=5,
-    save_steps=500,
-    logging_steps=50,
-    evaluation_strategy="steps",
-    eval_steps=200,
-    
-    # 硬件优化
-    gradient_checkpointing=True,
-    optim="adamw_torch_fused",
-    torch_compile=True
-)
-
 from datasets import load_dataset
+import torch
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model
+# 检查GPU可用性
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"GPU count: {torch.cuda.device_count()}")
 
-# 加载 JSON 文件
-dataset = load_dataset("json", data_files="/share/home/wuqingyao_zhangboyang/grpo/dataset/3000_grpo.json")["train"]
-split_datasets = dataset.train_test_split(test_size=0.01, seed=42)
-train_dataset = split_datasets["train"]
-test_dataset = split_datasets["test"]
-
-# Initialize trainer with multi-GPU support
-trainer = GRPOTrainer(
-    model="/share/home/wuqingyao_zhangboyang/2745",
-    reward_funcs=reward_function,  
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=test_dataset
+# 8-bit量化配置 (比4-bit更稳定，适合大多数情况)
+quant_config = BitsAndBytesConfig(
+    load_in_8bit=True,          # 启用8-bit量化
+    llm_int8_threshold=6.0,     # 数值稳定性阈值
+    llm_int8_skip_modules=["lm_head"],  # 跳过输出层量化（避免生成质量下降）
 )
 
-# Prepare the trainer for multi-GPU training
-trainer = accelerator.prepare(trainer)
+# 训练参数配置 (优化显存)
+training_args = GRPOConfig(
+    output_dir="./output",
+    per_device_train_batch_size=2,      # 单卡batch_size
+    gradient_accumulation_steps=4,      # 梯度累积
+    num_generations=2,                  # 每提示生成2个样本
+    
+    # 显存优化关键参数
+    fp16=True,                          # 混合精度训练
+    gradient_checkpointing=True,        # 梯度检查点
+    optim="adamw_torch_fused",          # 融合优化器
+    
+    # 序列长度
+    max_prompt_length=4096,             # 输入最大长度
+    max_completion_length=512,          # 输出最大长度
+    
+    # 其他配置
+    learning_rate=3e-5,
+    lr_scheduler_type="cosine",
+    warmup_ratio=0.1,
+    num_train_epochs=3,
+    logging_steps=50,
+    save_steps=500,
+)
 
-# Train
+# 加载数据集
+dataset = load_dataset("json", data_files="/share/home/wuqingyao_zhangboyang/grpo/dataset/3000_grpo.json")["train"]
+dataset = dataset.train_test_split(test_size=0.01)
+
+# 加载8-bit量化模型
+model = AutoModelForCausalLM.from_pretrained(
+    "/share/home/wuqingyao_zhangboyang/2745",
+    quantization_config=quant_config,    # 应用8-bit量化
+    device_map="auto",                  # 自动分配设备
+    torch_dtype=torch.float16,
+)
+peft_config = LoraConfig(
+    r=8,                  # 秩
+    lora_alpha=32,        # 缩放系数
+    target_modules=["q_proj", "v_proj"],  # 目标层（根据模型结构调整）
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+
+model = get_peft_model(model, peft_config)
+# 初始化训练器
+trainer = GRPOTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["test"],
+    reward_funcs=reward_function,
+)
+
+# 开始训练
 trainer.train()
