@@ -15,15 +15,16 @@ quant_config = BitsAndBytesConfig(
     llm_int8_skip_modules=["lm_head"],  # 跳过输出层量化（避免生成质量下降）
 )
 
+
+
 # 训练参数配置 (优化显存)
 training_args = GRPOConfig(
     output_dir="./output",
-    per_device_train_batch_size=2,      # 单卡batch_size
-    gradient_accumulation_steps=4,      # 梯度累积
-    num_generations=2,                  # 每提示生成2个样本
-    
+    per_device_train_batch_size=4,      # 单卡batch_size
+    gradient_accumulation_steps=2,      # 梯度累积
+    num_generations=4,                  # 每提示生成2个样本
+    bf16=True, 
     # 显存优化关键参数
-    fp16=True,                          # 混合精度训练
     gradient_checkpointing=True,        # 梯度检查点
     optim="adamw_torch_fused",          # 融合优化器
     
@@ -41,20 +42,23 @@ training_args = GRPOConfig(
 )
 
 # 加载数据集
-dataset = load_dataset("json", data_files="/share/home/wuqingyao_zhangboyang/grpo/dataset/3000_grpo.json")["train"]
+# 使用内存映射和预加载
+dataset = load_dataset("json", data_files="/share/home/wuqingyao_zhangboyang/grpo/dataset/3000_grpo.json",keep_in_memory=True,num_proc=8)["train"]
 dataset = dataset.train_test_split(test_size=0.01)
 
 # 加载8-bit量化模型
+# 使用flash_atten2
 model = AutoModelForCausalLM.from_pretrained(
     "/share/home/wuqingyao_zhangboyang/2745",
     quantization_config=quant_config,    # 应用8-bit量化
     device_map="auto",                  # 自动分配设备
     torch_dtype=torch.float16,
+    attn_implementation="flash_attention_2"
 )
 peft_config = LoraConfig(
     r=8,                  # 秩
     lora_alpha=32,        # 缩放系数
-    target_modules=["q_proj", "v_proj"],  # 目标层（根据模型结构调整）
+    target_modules=["q_proj", "v_proj", "v_proj", "o_proj"],  # 目标层（根据模型结构调整）
     lora_dropout=0.05,
     bias="none",
     task_type="CAUSAL_LM"
