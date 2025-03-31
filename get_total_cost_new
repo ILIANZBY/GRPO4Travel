@@ -1,0 +1,118 @@
+def get_total_cost(test_entry: Dict[str, Any], predicted_entry: Dict[str, Any]) -> float:
+    """Calculate total cost of the trip (交通 + 住宿 + 餐饮)"""
+    if not predicted_entry.get("plan"):
+        return float('inf')
+
+    total_cost = 0.0
+    org, dest = test_entry["org"], test_entry["dest"]
+    people = int(test_entry["people_number"])
+
+    try:
+        ref_info = json.loads(test_entry["reference_information"])
+    except (json.JSONDecodeError, AttributeError):
+        return float('inf')
+
+    # ---------------------- 1. 计算交通费用 ----------------------
+    for i, day in enumerate(predicted_entry["plan"]):
+        transport_info = day.get("transportation", "-").strip()
+        if transport_info == "-":
+            continue
+
+        transport_data = parse_transport_info(transport_info)
+        if transport_data == "-":
+            continue
+
+        # 去程交通（第一天）
+        if i == 0:
+            if "TrainNumber" in transport_data:
+                trains = ref_info.get(f"从{org}到{dest}的列车", [])
+                for train in trains:
+                    if (train["TrainNumber"] == transport_data["TrainNumber"] and
+                        get_departure_time(train) == get_departure_time(transport_data)):
+                        total_cost += float(train["Price"]) * people
+                        break
+            elif "FlightNumber" in transport_data:
+                flights = ref_info.get(f"从{org}到{dest}的航班", [])
+                for flight in flights:
+                    if (flight["FlightNumber"] == transport_data["FlightNumber"] and
+                        get_departure_time(flight) == get_departure_time(transport_data)):
+                        price_str = flight.get("DiscountPrice", flight["Price"])
+                        total_cost += float(price_str.replace("¥", "").strip()) * people
+                        break
+
+        # 返程交通（最后一天）
+        elif i == len(predicted_entry["plan"]) - 1:
+            if "TrainNumber" in transport_data:
+                trains = ref_info.get(f"从{dest}到{org}的列车", [])
+                for train in trains:
+                    if (train["TrainNumber"] == transport_data["TrainNumber"] and
+                        get_departure_time(train) == get_departure_time(transport_data)):
+                        total_cost += float(train["Price"]) * people
+                        break
+            elif "FlightNumber" in transport_data:
+                flights = ref_info.get(f"从{dest}到{org}的航班", [])
+                for flight in flights:
+                    if (flight["FlightNumber"] == transport_data["FlightNumber"] and
+                        get_departure_time(flight) == get_departure_time(transport_data)):
+                        price_str = flight.get("DiscountPrice", flight["Price"])
+                        total_cost += float(price_str.replace("¥", "").strip()) * people
+                        break
+
+    # ---------------------- 2. 计算住宿费用 ----------------------
+    hotels = ref_info.get(f"在{dest}的酒店", [])
+    hotel_price_map = {
+        acc["HotelName"].split('(')[0].strip(): float(acc["Price"].replace("¥", ""))
+        for acc in hotels if "Price" in acc
+    }
+    hotel_capacity_map = {
+        acc["HotelName"].split('(')[0].strip(): int(acc["MaximumOccupancy"])
+        for acc in hotels if "MaximumOccupancy" in acc
+    }
+
+    for day in predicted_entry["plan"][:-1]:  # 最后一天不计算住宿
+        acc_name = parse_accommodation_info(day.get("accommodation", "-"))
+        if acc_name == "-":
+            continue
+
+        matched_hotels = [name for name in hotel_price_map.keys() if acc_name in name]
+        if matched_hotels:
+            price = hotel_price_map[matched_hotels[0]]
+            capacity = hotel_capacity_map.get(matched_hotels[0], 2)  # 默认每间房2人
+            rooms = math.ceil(people / capacity)
+            total_cost += price * rooms
+
+    # ---------------------- 3. 计算餐饮费用 ----------------------
+    restaurants = ref_info.get(f"在{dest}的餐厅", [])
+    # 默认餐饮费用为80元/人/餐
+    DEFAULT_MEAL_COST = 80.0
+    
+    for day in predicted_entry["plan"]:
+        # 午餐费用
+        lunch = day.get("lunch", "-")
+        if isinstance(lunch, list):
+            lunch = lunch[0] if lunch else "-"
+        if lunch != "-":
+            # 查找餐厅价格，如果没有则使用默认值
+            lunch_cost = next(
+                (float(rest["Average Cost"]) 
+                for rest in restaurants 
+                if rest.get("Name") == lunch and rest.get("Average Cost") and isinstance(rest["Average Cost"], str)
+                , DEFAULT_MEAL_COST
+            )
+            total_cost += lunch_cost * people
+
+        # 晚餐费用
+        dinner = day.get("dinner", "-")
+        if isinstance(dinner, list):
+            dinner = dinner[0] if dinner else "-"
+        if dinner != "-":
+            # 查找餐厅价格，如果没有则使用默认值
+            dinner_cost = next(
+                (float(rest["Average Cost"]) 
+                for rest in restaurants 
+                if rest.get("Name") == dinner and rest.get("Average Cost") and isinstance(rest["Average Cost"], str)
+                ), DEFAULT_MEAL_COST
+            )
+            total_cost += dinner_cost * people
+
+    return round(total_cost, 2)
